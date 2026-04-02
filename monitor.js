@@ -91,7 +91,7 @@ async function buscarProposicoes() {
   console.log(`🔍 Buscando proposições de ${ano} na ALE-AM...`);
 
   do {
-    const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${pagina}&page_size=100&o=-data_apresentacao`;
+    const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${pagina}&page_size=100&o=-data_apresentacao&expand=tipo`;
     console.log(`  → Página ${pagina}/${totalPaginas}: ${url}`);
 
     const response = await fetch(url, {
