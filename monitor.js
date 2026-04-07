@@ -6,8 +6,12 @@ const EMAIL_REMETENTE = process.env.EMAIL_REMETENTE;
 const EMAIL_SENHA = process.env.EMAIL_SENHA;
 const ARQUIVO_ESTADO = 'estado.json';
 
-// ALE-AM usa SAPL — API REST pública, sem autenticação
 const API_BASE = 'https://sapl.al.am.leg.br/api';
+
+const HEADERS = {
+  'Accept': 'application/json',
+  'User-Agent': 'Mozilla/5.0 (compatible; monitor-legislativo/1.0)',
+};
 
 function carregarEstado() {
   if (fs.existsSync(ARQUIVO_ESTADO)) {
@@ -20,13 +24,30 @@ function salvarEstado(estado) {
   fs.writeFileSync(ARQUIVO_ESTADO, JSON.stringify(estado, null, 2));
 }
 
+async function buscarTipos() {
+  console.log('🔎 Buscando tipos de matéria...');
+  const mapa = {};
+  try {
+    const url = `${API_BASE}/materia/tipomaterialegislativa/?page_size=100`;
+    const res = await fetch(url, { headers: HEADERS });
+    const json = await res.json();
+    const lista = json.results || json;
+    lista.forEach(t => {
+      mapa[String(t.id)] = t.sigla || t.descricao || String(t.id);
+    });
+    console.log(`✅ ${Object.keys(mapa).length} tipos carregados: ${Object.values(mapa).join(', ')}`);
+  } catch (e) {
+    console.error('⚠️ Falha ao buscar tipos:', e.message);
+  }
+  return mapa;
+}
+
 async function enviarEmail(novas) {
   const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: { user: EMAIL_REMETENTE, pass: EMAIL_SENHA },
   });
 
-  // Agrupa por tipo
   const porTipo = {};
   novas.forEach(p => {
     const tipo = p.tipo || 'OUTROS';
@@ -91,12 +112,10 @@ async function buscarProposicoes() {
   console.log(`🔍 Buscando proposições de ${ano} na ALE-AM...`);
 
   do {
-    const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${pagina}&page_size=100&o=-data_apresentacao&expand=tipo`;
+    const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${pagina}&page_size=100&o=-data_apresentacao`;
     console.log(`  → Página ${pagina}/${totalPaginas}: ${url}`);
 
-    const response = await fetch(url, {
-      headers: { 'Accept': 'application/json' }
-    });
+    const response = await fetch(url, { headers: HEADERS });
 
     if (!response.ok) {
       console.error(`❌ Erro na API: ${response.status} ${response.statusText}`);
@@ -106,7 +125,7 @@ async function buscarProposicoes() {
     }
 
     const json = await response.json();
-    console.log(`📦 Resposta (estrutura): count=${json.count}, results=${json.results?.length}`);
+    console.log(`📦 Resposta: count=${json.count}, results=${json.results?.length}`);
 
     const results = json.results || [];
     todasProposicoes.push(...results);
@@ -117,23 +136,21 @@ async function buscarProposicoes() {
     }
 
     pagina++;
-  } while (pagina <= totalPaginas && pagina <= 5); // limite de segurança: 5 páginas (500 proposições)
+  } while (pagina <= totalPaginas && pagina <= 5);
 
   console.log(`📊 Total coletado: ${todasProposicoes.length} proposições`);
   return todasProposicoes;
 }
 
 function gerarId(p) {
-  // SAPL usa pk numérico como id
   return String(p.id || p.pk || `${p.tipo_materia}-${p.numero}-${p.ano}`);
 }
 
 async function resolverAutor(autorUrl) {
-  // A API do SAPL retorna autor como URL ou objeto aninhado
   if (!autorUrl) return '-';
   if (typeof autorUrl === 'string' && autorUrl.startsWith('http')) {
     try {
-      const res = await fetch(autorUrl, { headers: { 'Accept': 'application/json' } });
+      const res = await fetch(autorUrl, { headers: HEADERS });
       const data = await res.json();
       return data.nome || data.name || '-';
     } catch {
@@ -144,15 +161,21 @@ async function resolverAutor(autorUrl) {
   return String(autorUrl);
 }
 
-async function normalizarProposicao(p) {
-  // Campos padrão do SAPL 3.x
-  const tipo = p.tipo_materia_str || p.tipo_materia?.sigla || p.tipo_materia?.descricao || String(p.tipo_materia || '-');
+async function normalizarProposicao(p, mapasTipos) {
+  let tipo = '-';
+  if (p.tipo_materia && typeof p.tipo_materia === 'object') {
+    tipo = p.tipo_materia.sigla || p.tipo_materia.descricao || String(p.tipo_materia.id || '-');
+  } else if (p.tipo_materia) {
+    tipo = mapasTipos[String(p.tipo_materia)] || String(p.tipo_materia);
+  } else if (p.tipo_materia_str) {
+    tipo = p.tipo_materia_str;
+  }
+
   const numero = p.numero || '-';
   const ano = p.ano || '-';
   const ementa = (p.ementa || '-').substring(0, 200);
   const data = p.data_apresentacao || p.data_origem_externa || '-';
 
-  // Autor: pode vir como array de URLs ou campo texto
   let autor = '-';
   if (p.autores && Array.isArray(p.autores) && p.autores.length > 0) {
     const primeiro = p.autores[0];
@@ -167,15 +190,7 @@ async function normalizarProposicao(p) {
     autor = await resolverAutor(p.autor);
   }
 
-  return {
-    id: gerarId(p),
-    tipo,
-    numero,
-    ano,
-    autor,
-    data,
-    ementa,
-  };
+  return { id: gerarId(p), tipo, numero, ano, autor, data, ementa };
 }
 
 (async () => {
@@ -185,6 +200,7 @@ async function normalizarProposicao(p) {
   const estado = carregarEstado();
   const idsVistos = new Set(estado.proposicoes_vistas);
 
+  const mapasTipos = await buscarTipos();
   const proposicoesRaw = await buscarProposicoes();
 
   if (proposicoesRaw.length === 0) {
@@ -193,7 +209,7 @@ async function normalizarProposicao(p) {
   }
 
   console.log('🔄 Normalizando proposições...');
-  const proposicoes = await Promise.all(proposicoesRaw.map(normalizarProposicao));
+  const proposicoes = await Promise.all(proposicoesRaw.map(p => normalizarProposicao(p, mapasTipos)));
   const proposicoesValidas = proposicoes.filter(p => p.id);
   console.log(`📊 Total normalizado: ${proposicoesValidas.length}`);
 
