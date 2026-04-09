@@ -7,6 +7,7 @@ const EMAIL_SENHA = process.env.EMAIL_SENHA;
 const ARQUIVO_ESTADO = 'estado.json';
 
 const API_BASE = 'https://sapl.al.am.leg.br/api';
+const SITE_BASE = 'https://sapl.al.am.leg.br';
 
 const HEADERS = {
   'Accept': 'application/json',
@@ -42,6 +43,30 @@ async function buscarTipos() {
   return mapa;
 }
 
+async function buscarAutores() {
+  console.log('🔎 Buscando autores...');
+  const mapa = {};
+  try {
+    let url = `${API_BASE}/autoria/autor/?page_size=200`;
+    while (url) {
+      const res = await fetch(url, { headers: HEADERS });
+      const json = await res.json();
+      const lista = json.results || json;
+      lista.forEach(a => {
+        // autor pode ter nome direto ou referência a parlamentar/comissão
+        const nome = a.nome || a.name || (a.autor_related && a.autor_related.nome) || null;
+        if (a.id && nome) mapa[String(a.id)] = nome;
+      });
+      // paginação padrão DRF ou custom
+      url = json.next || json.pagination?.links?.next || null;
+    }
+    console.log(`✅ ${Object.keys(mapa).length} autores carregados`);
+  } catch (e) {
+    console.error('⚠️ Falha ao buscar autores:', e.message);
+  }
+  return mapa;
+}
+
 async function enviarEmail(novas) {
   const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -60,7 +85,7 @@ async function enviarEmail(novas) {
     const rows = porTipo[tipo].map(p =>
       `<tr>
         <td style="padding:8px;border-bottom:1px solid #eee;color:#555;font-size:12px">${p.tipo || '-'}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee"><strong>${p.numero || '-'}/${p.ano || '-'}</strong></td>
+        <td style="padding:8px;border-bottom:1px solid #eee"><strong><a href="${p.link}" style="color:#1a3a5c">${p.numero || '-'}/${p.ano || '-'}</a></strong></td>
         <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">${p.autor || '-'}</td>
         <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px;white-space:nowrap">${p.data || '-'}</td>
         <td style="padding:8px;border-bottom:1px solid #eee;font-size:12px">${p.ementa || '-'}</td>
@@ -125,72 +150,53 @@ async function buscarProposicoes() {
     }
 
     const json = await response.json();
-    console.log(`📦 Resposta: count=${json.count}, results=${json.results?.length}`);
-
     const results = json.results || [];
     todasProposicoes.push(...results);
 
-    if (pagina === 1 && json.count) {
-      totalPaginas = Math.ceil(json.count / 100);
-      console.log(`📊 Total de proposições em ${ano}: ${json.count} (${totalPaginas} páginas)`);
+    if (pagina === 1) {
+      // Paginação customizada da ALE-AM: pagination.total_pages
+      const total = json.pagination?.total_pages || json.pagination?.total_entries
+        ? Math.ceil(json.pagination.total_entries / 100)
+        : (json.count ? Math.ceil(json.count / 100) : 1);
+      totalPaginas = total;
+      console.log(`📊 Total de proposições em ${ano}: ${json.pagination?.total_entries || json.count || '?'} (${totalPaginas} páginas)`);
     }
 
+    console.log(`📦 Página ${pagina}: ${results.length} proposições`);
     pagina++;
-  } while (pagina <= totalPaginas && pagina <= 5);
+  } while (pagina <= totalPaginas && pagina <= 20);
 
   console.log(`📊 Total coletado: ${todasProposicoes.length} proposições`);
   return todasProposicoes;
 }
 
 function gerarId(p) {
-  return String(p.id || p.pk || `${p.tipo_materia}-${p.numero}-${p.ano}`);
+  return String(p.id || p.pk || `${p.tipo}-${p.numero}-${p.ano}`);
 }
 
-async function resolverAutor(autorUrl) {
-  if (!autorUrl) return '-';
-  if (typeof autorUrl === 'string' && autorUrl.startsWith('http')) {
-    try {
-      const res = await fetch(autorUrl, { headers: HEADERS });
-      const data = await res.json();
-      return data.nome || data.name || '-';
-    } catch {
-      return '-';
-    }
-  }
-  if (typeof autorUrl === 'object') return autorUrl.nome || autorUrl.name || '-';
-  return String(autorUrl);
-}
-
-async function normalizarProposicao(p, mapasTipos) {
-  let tipo = '-';
-  if (p.tipo_materia && typeof p.tipo_materia === 'object') {
-    tipo = p.tipo_materia.sigla || p.tipo_materia.descricao || String(p.tipo_materia.id || '-');
-  } else if (p.tipo_materia) {
-    tipo = mapasTipos[String(p.tipo_materia)] || String(p.tipo_materia);
-  } else if (p.tipo_materia_str) {
-    tipo = p.tipo_materia_str;
-  }
+function normalizarProposicao(p, mapasTipos, mapasAutores) {
+  // Campo é "tipo" (inteiro), não "tipo_materia"
+  const tipoId = String(p.tipo || p.tipo_materia || '-');
+  const tipo = mapasTipos[tipoId] || tipoId;
 
   const numero = p.numero || '-';
   const ano = p.ano || '-';
   const ementa = (p.ementa || '-').substring(0, 200);
   const data = p.data_apresentacao || p.data_origem_externa || '-';
 
+  // Link direto via link_detail_backend
+  const link = p.link_detail_backend
+    ? `${SITE_BASE}${p.link_detail_backend}`
+    : `${SITE_BASE}/materia/${p.id}`;
+
+  // Autores: array de inteiros
   let autor = '-';
   if (p.autores && Array.isArray(p.autores) && p.autores.length > 0) {
-    const primeiro = p.autores[0];
-    if (typeof primeiro === 'string' && primeiro.startsWith('http')) {
-      autor = await resolverAutor(primeiro);
-    } else if (typeof primeiro === 'object') {
-      autor = primeiro.nome || primeiro.name || '-';
-    } else {
-      autor = String(primeiro);
-    }
-  } else if (p.autor) {
-    autor = await resolverAutor(p.autor);
+    const id = String(p.autores[0]);
+    autor = mapasAutores[id] || `Autor ${id}`;
   }
 
-  return { id: gerarId(p), tipo, numero, ano, autor, data, ementa };
+  return { id: gerarId(p), tipo, numero, ano, autor, data, ementa, link };
 }
 
 (async () => {
@@ -200,7 +206,8 @@ async function normalizarProposicao(p, mapasTipos) {
   const estado = carregarEstado();
   const idsVistos = new Set(estado.proposicoes_vistas);
 
-  const mapasTipos = await buscarTipos();
+  const [mapasTipos, mapasAutores] = await Promise.all([buscarTipos(), buscarAutores()]);
+
   const proposicoesRaw = await buscarProposicoes();
 
   if (proposicoesRaw.length === 0) {
@@ -209,7 +216,7 @@ async function normalizarProposicao(p, mapasTipos) {
   }
 
   console.log('🔄 Normalizando proposições...');
-  const proposicoes = await Promise.all(proposicoesRaw.map(p => normalizarProposicao(p, mapasTipos)));
+  const proposicoes = proposicoesRaw.map(p => normalizarProposicao(p, mapasTipos, mapasAutores));
   const proposicoesValidas = proposicoes.filter(p => p.id);
   console.log(`📊 Total normalizado: ${proposicoesValidas.length}`);
 
