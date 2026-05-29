@@ -31,6 +31,7 @@ async function buscarTipos() {
   try {
     const url = `${API_BASE}/materia/tipomaterialegislativa/?page_size=100`;
     const res = await fetch(url, { headers: HEADERS });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
     const json = await res.json();
     const lista = json.results || json;
     lista.forEach(t => {
@@ -50,6 +51,7 @@ async function buscarAutores() {
     let url = `${API_BASE}/autoria/autor/?page_size=200`;
     while (url) {
       const res = await fetch(url, { headers: HEADERS });
+      if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       const json = await res.json();
       const lista = json.results || json;
       lista.forEach(a => {
@@ -146,7 +148,7 @@ async function buscarProposicoes() {
       console.error(`❌ Erro na API: ${response.status} ${response.statusText}`);
       const texto = await response.text();
       console.error('Resposta:', texto.substring(0, 300));
-      break;
+      throw new Error(`Erro na API: ${response.status} ${response.statusText}`);
     }
 
     const json = await response.json();
@@ -211,8 +213,7 @@ function normalizarProposicao(p, mapasTipos, mapasAutores) {
   const proposicoesRaw = await buscarProposicoes();
 
   if (proposicoesRaw.length === 0) {
-    console.log('⚠️ Nenhuma proposição encontrada.');
-    process.exit(0);
+    throw new Error('Nenhuma proposição encontrada. Falha provável de coleta/API; workflow deve ficar vermelho.');
   }
 
   console.log('🔄 Normalizando proposições...');
