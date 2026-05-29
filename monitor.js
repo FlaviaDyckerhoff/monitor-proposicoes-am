@@ -166,7 +166,7 @@ async function buscarProposicoes() {
 
     console.log(`📦 Página ${pagina}: ${results.length} proposições`);
     pagina++;
-  } while (pagina <= totalPaginas && pagina <= 20);
+  } while (pagina <= totalPaginas);
 
   console.log(`📊 Total coletado: ${todasProposicoes.length} proposições`);
   return todasProposicoes;
