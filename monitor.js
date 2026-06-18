@@ -295,6 +295,46 @@ function normalizarProposicao(p, mapasTipos, mapasAutores) {
   return { id: gerarId(p), tipo, numero, ano, autor, data, ementa, link };
 }
 
+function normalizarTextoChave(valor) {
+  return String(valor || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toUpperCase();
+}
+
+function chaveProposicao(p) {
+  return [
+    normalizarTextoChave(p.tipo),
+    normalizarTextoChave(p.numero),
+    normalizarTextoChave(p.ano),
+    normalizarTextoChave(p.ementa),
+  ].join('|');
+}
+
+function deduplicarProposicoes(proposicoes) {
+  const vistas = new Set();
+  const unicas = [];
+  let duplicadas = 0;
+
+  for (const p of proposicoes) {
+    const chave = chaveProposicao(p);
+    if (vistas.has(chave)) {
+      duplicadas++;
+      continue;
+    }
+    vistas.add(chave);
+    unicas.push(p);
+  }
+
+  if (duplicadas > 0) {
+    console.log(`🧹 Duplicatas removidas antes do email: ${duplicadas}`);
+  }
+
+  return unicas;
+}
+
 (async () => {
   console.log('🚀 Iniciando monitor ALE-AM...');
   console.log(`⏰ ${new Date().toLocaleString('pt-BR')}`);
@@ -312,8 +352,8 @@ function normalizarProposicao(p, mapasTipos, mapasAutores) {
 
   console.log('🔄 Normalizando proposições...');
   const proposicoes = proposicoesRaw.map(p => normalizarProposicao(p, mapasTipos, mapasAutores));
-  const proposicoesValidas = proposicoes.filter(p => p.id);
-  console.log(`📊 Total normalizado: ${proposicoesValidas.length}`);
+  const proposicoesValidas = deduplicarProposicoes(proposicoes.filter(p => p.id));
+  console.log(`📊 Total normalizado sem duplicatas: ${proposicoesValidas.length}`);
 
   const novas = proposicoesValidas.filter(p => !idsVistos.has(p.id));
   console.log(`🆕 Proposições novas: ${novas.length}`);
