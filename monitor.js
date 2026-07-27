@@ -494,6 +494,35 @@ async function enviarEmail(novas) {
   console.log(`✅ Email enviado com ${novas.length} proposições novas.`);
 }
 
+function aguardar(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchComRetry(url, options = {}, tentativas = 4) {
+  let ultimoErro = null;
+
+  for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
+    try {
+      const response = await fetch(url, options);
+      const deveTentarNovamente = [429, 500, 502, 503, 504].includes(response.status);
+      if (response.ok || !deveTentarNovamente || tentativa === tentativas) {
+        return response;
+      }
+
+      const texto = await response.text().catch(() => '');
+      console.warn(`⚠️ API instável (${response.status} ${response.statusText}) na tentativa ${tentativa}/${tentativas}: ${texto.substring(0, 120)}`);
+    } catch (err) {
+      ultimoErro = err;
+      if (tentativa === tentativas) throw err;
+      console.warn(`⚠️ Falha de rede na tentativa ${tentativa}/${tentativas}: ${err.message}`);
+    }
+
+    await aguardar(1500 * tentativa);
+  }
+
+  throw ultimoErro || new Error('Falha desconhecida ao consultar API');
+}
+
 async function buscarProposicoes() {
   const ano = new Date().getFullYear();
   const todasProposicoes = [];
@@ -506,7 +535,7 @@ async function buscarProposicoes() {
     const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${pagina}&page_size=100&o=-data_apresentacao`;
     console.log(`  → Página ${pagina}/${totalPaginas}: ${url}`);
 
-    const response = await fetch(url, { headers: HEADERS });
+    const response = await fetchComRetry(url, { headers: HEADERS });
 
     if (!response.ok) {
       console.error(`❌ Erro na API: ${response.status} ${response.statusText}`);
