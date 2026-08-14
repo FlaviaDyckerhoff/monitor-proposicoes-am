@@ -597,7 +597,17 @@ async function buscarProposicoes() {
       throw new Error(`Erro na API: ${response.status} ${response.statusText}`);
     }
 
-    const json = await response.json();
+    let json;
+    try {
+      json = await response.json();
+    } catch (err) {
+      const msg = `Resposta inválida na página ${pagina}: ${err.message}`;
+      if (todasProposicoes.length > 0) {
+        console.warn(`⚠️ ${msg}. Encerrando coleta com ${todasProposicoes.length} item(ns) já coletado(s).`);
+        break;
+      }
+      throw new Error(msg);
+    }
     const results = json.results || [];
     todasProposicoes.push(...results);
 
