@@ -12,6 +12,7 @@ const CONTROLE03_STATE_URL = process.env.CONTROLE03_STATE_URL || new URL('api/st
 const CONTROLE03_API_USER = process.env.CONTROLE03_API_USER || '';
 const CONTROLE03_API_PASS = process.env.CONTROLE03_API_PASS || '';
 const CONTROLE03_BASIC_AUTH = process.env.CONTROLE03_BASIC_AUTH || '';
+const EXIT_TRANSIENT_SOURCE = 75;
 
 
 const API_BASE = 'https://sapl.al.am.leg.br/api';
@@ -31,6 +32,13 @@ function carregarEstado() {
 
 function salvarEstado(estado) {
   fs.writeFileSync(ARQUIVO_ESTADO, JSON.stringify(estado, null, 2));
+}
+
+class FonteTransitoriaError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'FonteTransitoriaError';
+  }
 }
 
 async function buscarTipos() {
@@ -551,13 +559,43 @@ function aguardar(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function isTransientHttpStatus(status) {
+  return [408, 425, 429, 500, 502, 503, 504].includes(Number(status));
+}
+
+function isTransientNetworkError(err) {
+  const message = String((err && err.message) || '').toLowerCase();
+  return [
+    'fetch failed',
+    'econnreset',
+    'etimedout',
+    'eai_again',
+    'socket hang up',
+    'network',
+    'timeout',
+  ].some(fragment => message.includes(fragment));
+}
+
+function isTransientInvalidJson(texto) {
+  const t = String(texto || '').toLowerCase();
+  return (
+    t.includes('the request') ||
+    t.includes('temporarily') ||
+    t.includes('timeout') ||
+    t.includes('too many requests') ||
+    t.includes('cloudflare') ||
+    t.includes('<html') ||
+    t.includes('<!doctype')
+  );
+}
+
 async function fetchComRetry(url, options = {}, tentativas = 4) {
   let ultimoErro = null;
 
   for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
     try {
       const response = await fetch(url, options);
-      const deveTentarNovamente = [429, 500, 502, 503, 504].includes(response.status);
+      const deveTentarNovamente = isTransientHttpStatus(response.status);
       if (response.ok || !deveTentarNovamente || tentativa === tentativas) {
         return response;
       }
@@ -576,6 +614,54 @@ async function fetchComRetry(url, options = {}, tentativas = 4) {
   throw ultimoErro || new Error('Falha desconhecida ao consultar API');
 }
 
+async function fetchJsonComRetry(url, options = {}, tentativas = 4) {
+  let ultimoErro = null;
+
+  for (let tentativa = 1; tentativa <= tentativas; tentativa++) {
+    try {
+      const response = await fetch(url, options);
+      const texto = await response.text();
+
+      if (!response.ok) {
+        const msg = `Erro na API: ${response.status} ${response.statusText}`;
+        if (isTransientHttpStatus(response.status)) {
+          ultimoErro = new FonteTransitoriaError(msg);
+          if (tentativa < tentativas) {
+            console.warn(`⚠️ API instável (${response.status} ${response.statusText}) na tentativa ${tentativa}/${tentativas}: ${texto.substring(0, 120)}`);
+            await aguardar(15000 * tentativa);
+            continue;
+          }
+          throw ultimoErro;
+        }
+        console.error('Resposta:', texto.substring(0, 300));
+        throw new Error(msg);
+      }
+
+      try {
+        return JSON.parse(texto);
+      } catch (err) {
+        const msg = `Resposta inválida da API: ${err.message}`;
+        ultimoErro = isTransientInvalidJson(texto) ? new FonteTransitoriaError(msg) : new Error(msg);
+        if (tentativa < tentativas && ultimoErro instanceof FonteTransitoriaError) {
+          console.warn(`⚠️ API retornou resposta não-JSON na tentativa ${tentativa}/${tentativas}: ${texto.substring(0, 120)}`);
+          await aguardar(15000 * tentativa);
+          continue;
+        }
+        throw ultimoErro;
+      }
+    } catch (err) {
+      ultimoErro = err;
+      if (tentativa === tentativas || (!isTransientNetworkError(err) && !(err instanceof FonteTransitoriaError))) {
+        throw err;
+      }
+      console.warn(`⚠️ Falha transitória na API na tentativa ${tentativa}/${tentativas}: ${err.message}`);
+      await aguardar(15000 * tentativa);
+    }
+  }
+
+  throw ultimoErro || new FonteTransitoriaError('Falha transitória desconhecida ao consultar API');
+}
+
 async function buscarProposicoes() {
   const ano = new Date().getFullYear();
   const todasProposicoes = [];
@@ -588,26 +674,7 @@ async function buscarProposicoes() {
     const url = `${API_BASE}/materia/materialegislativa/?ano=${ano}&page=${pagina}&page_size=100&o=-data_apresentacao`;
     console.log(`  → Página ${pagina}/${totalPaginas}: ${url}`);
 
-    const response = await fetchComRetry(url, { headers: HEADERS });
-
-    if (!response.ok) {
-      console.error(`❌ Erro na API: ${response.status} ${response.statusText}`);
-      const texto = await response.text();
-      console.error('Resposta:', texto.substring(0, 300));
-      throw new Error(`Erro na API: ${response.status} ${response.statusText}`);
-    }
-
-    let json;
-    try {
-      json = await response.json();
-    } catch (err) {
-      const msg = `Resposta inválida na página ${pagina}: ${err.message}`;
-      if (todasProposicoes.length > 0) {
-        console.warn(`⚠️ ${msg}. Encerrando coleta com ${todasProposicoes.length} item(ns) já coletado(s).`);
-        break;
-      }
-      throw new Error(msg);
-    }
+    const json = await fetchJsonComRetry(url, { headers: HEADERS });
     const results = json.results || [];
     todasProposicoes.push(...results);
 
@@ -737,4 +804,12 @@ function deduplicarProposicoes(proposicoes) {
     estado.ultima_execucao = new Date().toISOString();
     salvarEstado(estado);
   }
-})();
+})().catch(err => {
+  console.error(`❌ Erro fatal: ${err.message}`);
+  if (err instanceof FonteTransitoriaError || isTransientNetworkError(err)) {
+    console.error(`::warning title=ALE-AM fonte instável::${err.message}`);
+    process.exit(EXIT_TRANSIENT_SOURCE);
+  }
+  console.error(err.stack);
+  process.exit(1);
+});
